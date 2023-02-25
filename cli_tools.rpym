@@ -1,0 +1,1273 @@
+# Copyright © 2017-2023 All rights reserved.
+# Sad Crab Company. Contacts: mailto:sadcrabcom@yandex.ru
+# License: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+init python early in _cli_tools:
+    import io
+    import os
+    import textwrap
+
+    # When renewing the year here, don't forget to renew as well:
+    # 1. In a code below
+    # 5. Text in copyright_update below
+    # 7. In community_tl/ARCHIVE_HOLDER_TEMPLATE.rpy
+    # 7. In community_tl/extra_code
+    COPYRIGHT_MESSAGE = textwrap.dedent("""\
+    # Copyright © 2017-2023 All rights reserved.
+    # Sad Crab Company. Contacts: mailto:sadcrabcom@yandex.ru
+    # License: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+    """)
+
+
+    _opened_files = {}
+    class TranslateFile(object):
+        def __init__(self, language, filename):
+            self.language = language
+            self.filename = filename
+
+            self.tlfn = os.path.join(
+                renpy.config.gamedir,
+                renpy.config.tl_directory,
+                language,
+                filename,
+            )
+
+            self.f = None
+
+            self.write_translate_strings = True
+
+            # Close the file properly before exit
+            renpy.config.quit_callbacks.append(self.close)
+
+        def open(self):
+            if not os.path.exists(self.tlfn):
+                dn = os.path.dirname(self.tlfn)
+
+                try:
+                    os.makedirs(dn)
+                except:
+                    pass
+
+                f = io.open(self.tlfn, "w+", encoding="utf-8")
+
+                f.write(COPYRIGHT_MESSAGE)
+
+            else:
+                f = io.open(self.tlfn, "a+", encoding="utf-8")
+
+            self.f = f
+
+        def close(self):
+            if self.f is not None:
+                self.f.close()
+                self.f = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def write(self, line):
+            if self.f is None:
+                self.open()
+
+            self.f.write(line)
+
+            if line.strip() and not line.strip().startswith("#"):
+                self.write_translate_strings = True
+
+        def write_missing_new_line(self):
+            if self.f is None:
+                self.open()
+
+            if (tell := self.f.tell()):
+                self.f.seek(tell - 1)
+                if self.f.readline().strip():
+                    self.write("\n")
+                    self.write("\n")
+                    self.f.seek(tell + 1)
+                else:
+                    self.f.seek(tell)
+
+        def write_translation_block(self, filename, linenumber, identifier, comment_block, code_block, language=None):
+            from renpy.parser import elide_filename
+            filename = elide_filename(filename)
+
+            self.write_missing_new_line()
+
+            self.write(f"# {filename}:{linenumber}\n")
+
+            self.write(f"translate {language or self.language} {identifier}:\n")
+            self.write("\n")
+
+            if isinstance(comment_block, basestring):
+                comment_block = [comment_block]
+
+            for line in comment_block:
+                self.write("    # " + line + "\n")
+
+            if isinstance(code_block, basestring):
+                code_block = [code_block]
+
+            for line in code_block:
+                self.write("    " + line + "\n")
+
+            self.write("\n")
+
+        def write_translation_string(self, filename, linenumber, old, new, language=None):
+            from renpy.translation import quote_unicode
+            from renpy.parser import elide_filename
+            filename = elide_filename(filename)
+
+            self.write_missing_new_line()
+
+            if self.write_translate_strings:
+                self.write(f"translate {language or self.language} strings:\n")
+                self.write("\n")
+
+            self.write(f"    # {filename}:{linenumber}\n")
+            self.write(f"    old \"{quote_unicode(old)}\"\n")
+            self.write(f"    new \"{quote_unicode(new)}\"\n")
+            self.write("\n")
+
+            self.write_translate_strings = False
+
+
+    def get_translate_file(language, filename, lazy=False):
+        # Filename should be relative to basedir or renpy_base
+        filename = renpy.parser.elide_filename(filename)
+
+        if filename.startswith("game/"):
+            filename = filename[5:]
+
+        if (not lazy) and filename.endswith("rpym"):
+            filename = filename[:-1]
+
+        if (language, filename) in _opened_files:
+            rv = _opened_files[language, filename]
+        else:
+            rv = TranslateFile(language, filename)
+            _opened_files[language, filename] = rv
+
+        return rv
+
+
+    _changed_files = {}
+    def replace_file_line(fn, linenumber, new_line):
+        """
+        Replaces line on `linenumber` in `fn` filename with `new_line`.
+        `linenumber` is 1-indexed integer and `fn` should be path relative
+        to basedir (directory with exe).
+        """
+
+        fn = os.path.join(renpy.config.basedir, fn)
+        if fn not in _changed_files:
+            with io.open(fn, "r", encoding="utf-8") as f:
+                _changed_files[fn] = f.readlines()
+
+            def update_lines():
+                if fn not in _changed_files:
+                    return
+
+                with io.open(fn, "w", encoding="utf-8") as f:
+                    f.writelines(_changed_files[fn])
+            renpy.config.quit_callbacks.append(update_lines)
+
+        line = _changed_files[fn][linenumber - 1]
+
+        indent, _, comment = split_line(line)
+
+        new_line = indent + new_line.rstrip() + (comment or "") + "\n"
+        _changed_files[fn][linenumber - 1] = new_line
+
+
+    def generate_translate_block_digest(block):
+        """
+        Returns an 8-char hex based on the md5 digest of the code of statement block.
+        `block` - List or tuple of ast.Say (or other translation_relevant) statements.
+        Most often this list is 1 item long.
+        """
+        import hashlib
+
+        md5 = hashlib.md5()
+        for i in block:
+            # id clause should not mutate block's hash
+            if isinstance(i, renpy.ast.Say):
+                old_id = getattr(i, "identifier", None)
+                if old_id is not None:
+                    del i.identifier
+            code = i.get_code()
+            if isinstance(i, renpy.ast.Say):
+                if old_id is not None:
+                    i.identifier = old_id
+
+            md5.update((code + "\r\n").encode("utf-8"))
+
+        return md5.hexdigest()[:8]
+
+
+    def generate_translate_block(label, block, use_id=False, identifiers=None):
+        """
+        Creates ast.Translate with a new identifier based on passed Say statements block.
+        `identifiers` if not None should be an iterable with existent identifiers.
+        """
+
+        base = None
+        if use_id:
+            if isinstance(block[-1], renpy.ast.Say):
+                base = getattr(block[-1], "identifier", None)
+
+        if base is None:
+            digest = generate_translate_block_digest(block)
+            if label is None:
+                base = digest
+            else:
+                base = label.replace(".", "_") + "_" + digest
+
+        identifier = base
+        if identifiers is not None:
+            i = 0
+            suffix = ""
+            while True:
+
+                identifier = base + suffix
+
+                if identifier not in identifiers:
+                    break
+
+                i += 1
+                suffix = f"_{i}"
+
+        loc = (block[0].filename, block[0].linenumber)
+        tl = renpy.ast.Translate(loc, identifier, None, block)
+        tl.name = block[0].name + ("translate", )
+        return tl
+
+
+    def split_identifier(identifier):
+        """
+        Splits identifier into (label, digest, repeat) and
+        returns a tuple of these elements.
+        `label` may be combionation of global and local label names.
+        `repeat` part may be None if absent.
+        """
+        label, _, hex = identifier.rpartition("_")
+        repeat = None
+        if len(hex) != 8:
+            repeat = hex
+            label, _, hex = label.rpartition("_")
+        return label, hex, repeat
+
+
+    def split_line(line):
+        """
+        Splits the code line into (indent, code, comment) and
+        returns a tuple of these elements.
+        `comment` may be None if absent.
+        If line is not indented, `indent` is empty string.
+        Note, it will strip closing new line symbol.
+        """
+        # We follow invariant line.rstrip() == indent + code + (comment or "")
+
+        line = line.rstrip()
+
+        if not line.lstrip():
+            return "", "", None
+
+        import re
+        indent = re.match("(?: {4})+", line)
+        if indent is not None:
+            indent = indent.group(0)
+            line = line[len(indent):]
+        else:
+            indent = ""
+
+        # Fast way for no comment or only comment
+        if "#" not in line:
+            return indent, line, None
+        elif re.match(" *#", line):
+            return indent, "", line
+
+        i = 0
+        delim = None
+        spacerun = 0
+        while i < len(line):
+            c = line[i]
+            if c == " ":
+                i += 1
+                spacerun += 1
+                continue
+
+            elif c in "\"'`":
+                if delim is None:
+                    delim = c
+                elif c == delim:
+                    delim = None
+
+            elif c == "#":
+                if delim is None:
+                    comment = " " * spacerun + line[i:]
+                    code = line[:i - spacerun]
+                    break
+
+            spacerun = 0
+            i += 1
+        else:
+            code = line
+            comment = None
+        return indent, code, comment
+
+
+    def check_block_is_single_say(block):
+        if len(block) != 1 or not isinstance(block[0], renpy.ast.Say):
+            try:
+                loc = f" at {block[0].filename}:{block[0].linenumber}"
+            except Exception:
+                loc = ""
+            raise Exception(f"Can not work with non-standard Translate blocks{loc}")
+
+
+    def get_all_translation_entities(node_validator=None, string_validator=None):
+        translator = renpy.game.script.translator
+        generation = renpy.translation.generation
+        scanstrings = renpy.translation.scanstrings
+
+        if node_validator is None:
+            node_validator = lambda x: x
+
+        if string_validator is None:
+            string_validator = lambda x: x
+
+        strings = []
+        result = {}
+        for filename in generation.translate_list_files():
+            fn, common = generation.shorten_filename(filename)
+            strings.extend(scanstrings.scan_strings(filename))
+            translate_nodes = [node_validator(t) for _, t in translator.file_translates[filename]]
+            result[fn, common] = [translate_nodes, []]
+
+        seen = set()
+        for s in sorted(strings, key=lambda s: s.sort_key):
+
+            if s.priority < 0:
+                continue
+
+            if s.priority > 299:
+                continue
+
+            if s.text in seen:
+                continue
+
+            seen.add(s.text)
+            result[s.elided, s.common][1].append(string_validator(s))
+
+        return result
+
+
+    def swap_translation():
+        from collections import OrderedDict
+        translator = renpy.game.script.translator
+        namemap = renpy.game.script.namemap
+
+        ap = renpy.arguments.ArgumentParser(description="Swaps translation and ingame code.")
+        ap.add_argument("label", nargs='+', help="Global and optional local label name to which to look for translations.")
+        ap.add_argument("--keep-orig", action='store_true', help='Will not change original file, only generate output.')
+        ap.add_argument('--write-missed-tl', action='store_true', help='Will create and write new translate blocks for missed lines.')
+        ap.add_argument('--skip-missed', action='store_true', help='Will not write comments for lines with missed translation.')
+        ap.add_argument('--skip-existent', action='store_true', help='Will skip lines which already exist in target language.')
+        ap.add_argument('--source-language', action='store', help='Name of language from which translations are taken (default "swap").', default="swap")
+        ap.add_argument("--target-language", action='store', help='Name of the language for which the swap will be generated (default "english").', default="english")
+        args = ap.parse_args()
+
+        # Check if each listed label exists.
+        for label in args.label:
+            if label not in namemap:
+                ap.error(f"label '{label}' does not exists.")
+
+        # Make a projection from node to its label (global or global.local).
+        node_to_label = OrderedDict()
+        node_to_label.current_label = None
+        def get_trans(node):
+            if isinstance(node, renpy.ast.Label):
+                if not node.hide:
+                    node_to_label.current_label = node.name
+
+            if isinstance(node, renpy.ast.Translate):
+                node_to_label[node] = node_to_label.current_label
+
+        for label in args.label:
+            namemap[label].get_children(get_trans)
+
+        # Took all ast.Translate nodes of targeting language.
+        source_translates = {k[0]: v for k, v in translator.language_translates.items() if k[1] == args.source_language}
+
+        skipped = 0
+        swapped = 0
+        missed = 0
+
+        rv = []  # List of (label, old translate node, new translate node or None, existent translate node or None)
+        for node, label in node_to_label.items():
+            check_block_is_single_say(node.block)
+
+            existent = translator.language_translates.get((node.identifier, args.target_language))
+            if existent is not None:
+                if args.skip_existent:
+                    skipped += 1
+                    continue
+                else:
+                    check_block_is_single_say(existent.block)
+
+            new_node = source_translates.get(node.identifier)
+            if new_node is not None:
+                check_block_is_single_say(new_node.block)
+
+            rv.append((label, node, new_node, existent))
+
+        for label, t, new_t, existent in rv:
+            if new_t is not None:
+                # Re-create Translate node with new identifier or existent id
+                new_t = generate_translate_block(label, new_t.block, use_id=True)
+                identifier = new_t.identifier
+                replace_str = new_t.block[0].get_code()
+                write_tl = True
+                swapped += 1
+
+            elif args.skip_missed:
+                missed += 1
+                continue
+
+            else:
+                identifier = "MISSED"
+                replace_str = t.block[0].get_code() + "  # MISSED!"
+                write_tl = args.write_missed_tl
+                missed += 1
+
+            if not args.keep_orig:
+                replace_file_line(t.filename, t.linenumber, replace_str)
+
+            if not write_tl:
+                continue
+
+            if existent is not None:
+                replace_file_line(existent.block[0].filename, existent.block[0].linenumber, t.block[0].get_code())
+
+            else:
+
+                if new_t is None:
+                    new_line = "MISSED LINE"
+                else:
+                    new_line = new_t.block[0].get_code()
+
+                with get_translate_file(args.target_language, t.filename) as f:
+                    f.write_translation_block(
+                        t.filename, t.linenumber, identifier,
+                        new_line, t.block[0].get_code())
+
+        print(f"{swapped} lines swapped, {skipped} lines skipped, {missed} lines missing.")
+        return False
+    renpy.arguments.register_command("swap_translation", swap_translation)
+
+
+    def took_existent_translation():
+        translator = renpy.game.script.translator
+        namemap = renpy.game.script.namemap
+        generation = renpy.translation.generation
+
+        ap = renpy.arguments.ArgumentParser(description="Took existent translations based on line digest only.")
+        ap.add_argument("label", nargs='+', help="Global and optional local label name to which to look for translations.")
+        ap.add_argument('--write-missed-tl', action='store_true', help='Will create and write new translate blocks for missed lines.')
+        ap.add_argument("--target-language", action='store', help='Name of the language for which the lines will be generated (default "english").', default="english")
+        args = ap.parse_args()
+
+        # Check if each listed label exists.
+        for label in args.label:
+            if label not in namemap:
+                ap.error(f"label '{label}' does not exists.")
+
+        # Took ast.Translate statements present in passed labels
+        translate_nodes = []
+        def get_trans(node):
+            if isinstance(node, renpy.ast.Translate):
+                translate_nodes.append(node)
+
+        for label in args.label:
+            namemap[label].get_children(get_trans)
+
+        # Took all ast.Translate nodes of targeting language.
+        source_translates = {k[0]: v for k, v in translator.language_translates.items() if k[1] == args.target_language}
+
+        # Fill up possible ambiguous matches
+        hex_to_node = {}
+        hex_ambiguous = {}
+        for identifier, node in source_translates.items():
+            _, hex, repeat = split_identifier(identifier)
+
+            if repeat is not None:
+                hex_ambiguous[hex] = True
+
+            if hex in hex_to_node:
+                hex_ambiguous[hex] = True
+            else:
+                hex_to_node[hex] = node
+
+        rv = []  # List of (script translate node, matched translate node or None, is match ambiguous)
+        for node in translate_nodes:
+            ambiguous = False
+
+            # Do not change existent translation
+            if (node.identifier, args.target_language) in translator.language_translates:
+                continue
+
+            new_node = source_translates.get(node.identifier)
+            if new_node is None:
+                _, hex, _ = split_identifier(node.identifier)
+                if hex in hex_to_node:
+                    new_node = hex_to_node[hex]
+                ambiguous = hex in hex_ambiguous
+
+            check_block_is_single_say(node.block)
+            if new_node is not None:
+                check_block_is_single_say(new_node.block)
+
+            rv.append((node, new_node, ambiguous))
+
+        updated = 0
+        missed = 0
+        for t, new_t, ambiguous in rv:
+            if new_t is not None:
+                trans_str = new_t.block[0].get_code()
+                if ambiguous:
+                    trans_str += "  # AMBIGUOUS!"
+                updated += 1
+
+            elif not args.write_missed_tl:
+                missed += 1
+                continue
+
+            else:
+                trans_str = t.block[0].get_code(generation.empty_filter)
+                missed += 1
+
+            with get_translate_file(args.target_language, t.filename) as f:
+                f.write_translation_block(
+                    t.filename, t.linenumber, t.identifier,
+                    t.block[0].get_code(), trans_str)
+
+        print(f"{updated} lines updated, {missed} lines missing.")
+        return False
+    renpy.arguments.register_command("took_existent_translation", took_existent_translation)
+
+
+    def refresh_translation():
+        import shutil
+        translator = renpy.game.script.translator
+        generation = renpy.translation.generation
+        scanstrings = renpy.translation.scanstrings
+        copyright = COPYRIGHT_MESSAGE
+
+        ap = renpy.arguments.ArgumentParser(description=textwrap.dedent("""\
+        Refreshes the translation for the game script.
+        Clears hanging strings, rearranges translation blocks to match current code,
+        merges multiple string translation blocks.
+        Note: this will lose any additional code and comments in the translation files.
+        """))
+        ap.add_argument('--write-missed-tl', action='store_true', help='Will create and write new translate blocks for missed lines.')
+        args = ap.parse_args()
+
+        list_files = [i for i in renpy.list_files() if i.startswith("tl/") and i.endswith(".rpy")]
+
+        strings = []
+        for filename in generation.translate_list_files():
+
+            # Take common strings in separate list to filter them later
+            fn, common = generation.shorten_filename(filename)
+            if common:
+                strings.extend(scanstrings.scan_strings(filename))
+                continue
+
+            # Update dialogues
+            for label, t in translator.file_translates[filename]:
+
+                for language in translator.languages:
+
+                    trans_t = translator.language_translates.get((t.identifier, language))
+                    if trans_t is None:
+                        if not args.write_missed_tl:
+                            continue
+
+                        trans_t = t
+                        filter = generation.empty_filter
+
+                    else:
+                        filter = generation.null_filter
+                        # Update id clause in translate node, so it is consistent for swap
+                        check_block_is_single_say(t.block)
+                        check_block_is_single_say(trans_t.block)
+                        trans_t.block[0].identifier = t.block[0].identifier
+
+                    with get_translate_file(language + "__new", fn) as f:
+                        f.write_translation_block(
+                            t.filename, t.linenumber, t.identifier,
+                            [n.get_code() for n in t.block],
+                            [n.get_code(filter) for n in trans_t.block],
+                            language)
+
+            strings.extend(scanstrings.scan_strings(filename))
+
+        def filter_sort_strings():
+            seen = set()
+            for s in sorted(strings, key=lambda s: s.sort_key):
+
+                if s.priority < 0:
+                    continue
+
+                if s.priority > 299:
+                    continue
+
+                if s.text in seen:
+                    continue
+
+                seen.add(s.text)
+                yield s
+
+        for language in translator.languages:
+            stl = translator.strings[language]
+            for s in filter_sort_strings():
+                trans_text = stl.translate(s.text)
+
+                if trans_text is s.text:
+                    if not args.write_missed_tl:
+                        continue
+
+                    trans_text = ""
+
+                fn = generation.translation_filename(s)
+                with get_translate_file(language + "__new", fn) as f:
+                    f.write_translation_string(s.filename, s.line, s.text, trans_text, language)
+
+        # Overwrite changed files
+        changed_files = set()
+        for tf in _opened_files.values():
+            tf.close()
+            fn = os.path.normpath(tf.tlfn)
+            dst_fn = fn.replace("__new", "")
+
+            try:
+                os.makedirs(os.path.dirname(dst_fn))
+            except:
+                pass
+
+            changed_files.add(dst_fn)
+
+            try:
+                shutil.copy(fn, dst_fn)
+            except Exception as e:
+                # Try once again to dodge the race with IDE or git
+                shutil.copy(fn, dst_fn)
+            os.unlink(fn)
+
+        # Remove rest of rpy files in tl folder
+        for fn in list_files:
+            fn = os.path.join(renpy.config.gamedir, fn)
+            fn = os.path.normpath(fn)
+            if fn not in changed_files:
+                if os.path.basename(fn) == "common.rpy":
+                    continue
+
+                os.unlink(fn)
+                os.unlink(fn + "c")
+
+        for language in translator.languages:
+            shutil.rmtree(os.path.normpath(os.path.join(
+                renpy.config.gamedir,
+                renpy.config.tl_directory,
+                language + "__new",
+            )))
+        return False
+    renpy.arguments.register_command("refresh_translation", refresh_translation)
+
+
+    def generate_identifiers():
+        import hashlib
+        translator = renpy.game.script.translator
+        namemap = renpy.game.script.namemap
+        generation = renpy.translation.generation
+
+        ap = renpy.arguments.ArgumentParser(description="Generates dialogue line identifiers, freezing it for line change.")
+        ap.add_argument("label", nargs='+', help="Global and optional local label name to which to look for generation.")
+        args = ap.parse_args()
+
+        labels = []
+        if args.label == ["whole-project"]:
+            for node in namemap.values():
+                if not isinstance(node, renpy.ast.Label):
+                    continue
+
+                if not node.filename.startswith("renpy/common"):
+                    labels.append(node.name)
+
+        else:
+            # Check if each listed label exists.
+            for label in args.label:
+                if label not in namemap:
+                    ap.error(f"label '{label}' does not exists.")
+
+                labels.append(label)
+
+        # Collect nodes to generate and existent ids.
+        node_to_label = {}
+        node_to_label.current_label = None
+        existing_ids = set()
+        def get_trans(node):
+            if isinstance(node, renpy.ast.Label):
+                if not node.hide:
+                    node_to_label.current_label = node.name
+                return
+
+            if not isinstance(node, renpy.ast.Translate):
+                return
+
+            if node.language is not None:
+                return
+
+            check_block_is_single_say(node.block)
+            identifier = getattr(node.block[0], "identifier", None)
+
+            if identifier is None:
+                node_to_label[node] = node_to_label.current_label
+            else:
+                existing_ids.add(identifier)
+
+        for label in labels:
+            namemap[label].get_children(get_trans)
+
+        skipped = len(existing_ids)
+        updated = 0
+
+        # Make a projection from node to its id.
+        node_to_id = {}
+        for node, label in node_to_label.items():
+            new_t = generate_translate_block(label, node.block, use_id=False)
+
+            md5 = hashlib.md5()
+            md5.update(new_t.identifier.encode("utf-8"))
+            digest = md5.hexdigest()[:8]
+
+            say = node.block[0]
+
+            who = say.who
+            if who is None:
+                who = "narrator"
+
+            elif not say.who_fast:
+                raise Exception("What is this?")
+
+            base = f"{who}_{digest}"
+
+            i = 0
+            suffix = ""
+            while True:
+
+                identifier = base + suffix
+
+                if identifier not in existing_ids:
+                    break
+
+                i += 1
+                suffix = f"_{i}"
+
+            node_to_id[node] = identifier
+            existing_ids.add(identifier)
+            updated += 1
+
+        get_trans = translator.language_translates.get
+        for t, new_id in node_to_id.items():
+            translates = {}
+            translates[None] = t
+
+            for l in translator.languages:
+                translates[l] = get_trans((t.identifier, l), None)
+
+            for language, n in translates.items():
+                if n is None:
+                    with get_translate_file(language, t.filename) as f:
+                        f.write_translation_block(
+                            t.filename, t.linenumber, new_id,
+                            t.block[0].get_code(),
+                            t.block[0].get_code(generation.empty_filter))
+                    continue
+
+                say = n.block[0]
+                say.identifier = new_id
+                new_text = say.get_code()
+                del say.identifier
+                replace_file_line(say.filename, say.linenumber, new_text)
+
+                if n.language is not None:
+                    new_text = f"translate {n.language} {new_id}:"
+                    replace_file_line(n.filename, n.linenumber, new_text)
+
+        print(f"{updated} lines updated, {skipped} lines skipped.")
+        return False
+    renpy.arguments.register_command("generate_identifiers", generate_identifiers)
+
+    def export_csv():
+        import re
+        import csv
+        import json
+        import hashlib
+        import functools
+        from pathlib import Path
+        from collections import defaultdict
+        from renpy.parser import elide_filename
+        from renpy.translation import quote_unicode
+
+        renpy.arguments.takes_no_arguments("Generates CSV-file of all game translatable strings.")
+
+        community_tl = Path(renpy.config.basedir) / "community_tl"
+
+        with (community_tl / "COMPONENTS.json").open("r", encoding="utf-8") as f:
+            components = {re.compile(k): v for k, v in json.load(f).items()}
+
+        with (community_tl / "EXISTING_LANGUAGES.json").open("r", encoding="utf-8") as f:
+            languages = {v: k for k, v in json.load(f).items()}
+
+        with (community_tl / "lines.json").open("r", encoding="utf-8") as f:
+            langs_lines = json.load(f)
+
+        @functools.cache
+        def get_component_name(filename):
+            filename = Path(filename).as_posix()
+            for pattern, component in components.items():
+                if re.match(pattern, filename):
+                    return component
+
+        def node_validator(node):
+            check_block_is_single_say(node.block)
+            if getattr(node.block[0], "identifier", None) is None:
+                raise Exception("All dialogue lines should have id clause. Generate identifiers first.")
+            return node
+
+        HEADER = [
+            "location",             # Location of source line in format game-releated-path:linenumber
+            "source",               # id clause of dialogue line or md5 hash of translatable string
+            "target",               # String to be translated, may be dialogue text or translatable string
+            "ID",                   # Ignored in import
+            "fuzzy",                # To be used, for now it is always False
+            "context",              # Ignored in import
+            "translator_comments",  # Ignored in import
+            "developer_comments",   # Full line of code as is
+        ]
+
+        # Result filename: rows to be written into csv file
+        components_rows = defaultdict(list)
+        seen_ids = set()
+        for (fn, common), (tl_nodes, tl_strings) in get_all_translation_entities(node_validator).items():
+            for node in tl_nodes:
+                say = node.block[0]
+                identifier = say.identifier
+
+                if identifier in seen_ids:
+                    continue
+                seen_ids.add(identifier)
+
+                filename = elide_filename(say.filename)
+                location = f"{filename}:{say.linenumber}"
+
+                code = say.get_code()
+                target = quote_unicode(say.what)
+
+                item = [
+                    location,    # location
+                    identifier,  # source
+                    target,      # target
+                    None,        # ID
+                    "False",     # fuzzy
+                    None,        # context
+                    None,        # translator_comments
+                    code,        # developer_comments
+                ]
+
+                component_name = get_component_name(filename)
+                components_rows[component_name].append(item)
+
+            for s in tl_strings:
+                filename = elide_filename(s.filename)
+                location = f"{filename}:{s.line}"
+                code = quote_unicode(s.text)
+                source = '"' + code + '"'
+
+                md5 = hashlib.md5()
+                md5.update(s.text.encode("utf-8"))
+                identifier = "string_" + md5.hexdigest()[:8]
+
+                if identifier in seen_ids:
+                    continue
+                seen_ids.add(identifier)
+
+                item = [
+                    location,    # location
+                    identifier,  # source
+                    code,        # target
+                    None,        # ID
+                    "False",     # fuzzy
+                    None,        # context
+                    None,        # translator_comments
+                    source,      # developer_comments
+                ]
+
+                if s.common:
+                    component_name = "common"
+                else:
+                    component_name = get_component_name(filename)
+
+                components_rows[component_name].append(item)
+
+        export_dir = community_tl / "export"
+        for component_name, rows in components_rows.items():
+            for game_lang, weblate_lang in languages.items():
+                if game_lang == 'english':
+                    out_rows = rows
+                else:
+                    get_trans = (lambda id: langs_lines.get(id, {}).get(game_lang, ""))
+                    out_rows = [[l, id, get_trans(id), *rest] for l, id, _, *rest in rows]
+
+                out_fn = export_dir / component_name / f"{weblate_lang}.csv"
+                out_fn.parent.mkdir(parents=True, exist_ok=True)
+                with out_fn.open("w", encoding="utf-8", newline="") as f:
+                    writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+                    writer.writerow(HEADER)
+                    writer.writerows(out_rows)
+        return False
+    renpy.arguments.register_command("export_csv", export_csv)
+
+
+
+    def import_community_tl():
+        import os
+        import re
+        import ast
+        import json
+        import shutil
+        import hashlib
+        from pathlib import Path
+        from itertools import tee
+
+        def pairwise(iterable):
+            # pairwise('ABCDEFG') --> AB BC CD DE EF FG
+            a, b = tee(iterable)
+            next(b, None)
+            return zip(a, b)
+
+        launcher = False
+
+        basedir = os.environ.get("BASEDIR", renpy.config.basedir)
+        community_tl = Path(basedir, "community_tl")
+
+        with (community_tl / "EXISTING_LANGUAGES.json").open("r", encoding="utf-8") as f:
+            languages = list(set(json.load(f).values()) - {"english", "russian"})
+
+        with (community_tl / "LANGUAGE_NAMES.json").open("r", encoding="utf-8") as f:
+            language_names = json.load(f)
+
+        with (community_tl / "lines.json").open("r", encoding="utf-8") as f:
+            langs_lines = json.load(f)
+
+        renpy.arguments.takes_no_arguments("Generates rpy translation files from imported lines from weblate.")
+
+        formatter = renpy.substitutions.formatter
+        VARIABLE_PATTERN = re.compile(r"^[a-zA-Z0-9._\[\]]+$")
+        STRING_RE = r"""(?x){\s*image\s*=\s*(.*?)}"""
+        def validate_line(origin, string, id):
+            test_string = f'"{string}"'
+            # Check if string is a valid string literal
+            try:
+                string = ast.literal_eval(test_string)
+            except Exception as e:
+                # Check for common mistakes
+                escaped_slash = False
+                for i, (c1, c2) in enumerate(pairwise(string), start=1):
+                    if c1 == c2 == "\\":
+                        escaped_slash = True
+                        continue
+
+                    if c1 == "\\" and c2 == '"':
+                        if escaped_slash:
+                            return True, f"Line {id!r}: bad escape sequence at position {i}, change \\\\\" to \\\""
+
+                    if c2 == '"' and c1 != "\\":
+                        return True, f"Line {id!r}: bad escape sequence at position {i}, change \" to \\\""
+
+                    escaped_slash = False
+
+                return True, f"Line {id!r}: {e}"
+
+            for m in re.finditer(STRING_RE, string):
+
+                s = m.group(1)
+
+                if s is None:
+                    continue
+
+                s = s.strip()
+
+                if not renpy.loader.loadable(s):
+                    return True, f"Line {id!r}: uses an image which which is not loadable, check that file path is equal to original."
+
+                if not s.startswith(("gui/", "images/ui/", "images/mechanics/")):
+                    return True, f"Line {id!r}: uses a png image which will be replaced by webp, check that file path is equal to original."
+
+            # Check if substitutions are valid and match original.
+            orig_substitutions = set()
+            for literal, field, format, repl in formatter.parse(origin):
+                if field is None:
+                    continue
+                compile(field, "<string>", "eval")
+                orig_substitutions.add(field)
+
+            line_substitutions = set()
+            try:
+                for literal, field, format, repl in formatter.parse(string):
+                    if field is None:
+                        continue
+
+                    match = re.match(VARIABLE_PATTERN, field)
+                    if match is None:
+                        return True, f"Line {id!r}: could not parse string substitution. It's likely contains illegal character."
+
+                    compile(field, "<string>", "eval")
+                    line_substitutions.add(field)
+
+            except Exception as e:
+                return True, f"Line {id!r}: {e}"
+
+            if diff := (orig_substitutions ^ line_substitutions):
+                return True, f"Line {id!r}: substitutions does not match source string, difference is: {', '.join(map(str, diff))}"
+
+            # Check if text tags are valid.
+            msg = renpy.check_text_tags(string)
+            if msg:
+                return True, f"Line {id!r}: {msg}"
+
+            return False, string
+
+        log_fn = "log_launcher.txt" if launcher else "log.txt"
+        with (community_tl / log_fn).open("w", encoding="utf-8") as log_file:
+            def log(what):
+                log_file.write(what + "\n")
+                print(what + "\n")
+
+            id_to_translate = {}
+            seen_ids = set()
+            total_lines = 0
+            for (fn, common), (tl_nodes, tl_strings) in get_all_translation_entities().items():
+                for node in tl_nodes:
+                    identifier = node.identifier
+                    if identifier in seen_ids:
+                        continue
+
+                    seen_ids.add(identifier)
+                    id_to_translate[identifier] = node.block[0]
+                    total_lines += 1
+
+                for string in tl_strings:
+                    md5 = hashlib.md5()
+                    md5.update(string.text.encode("utf-8"))
+                    identifier = "string_" + md5.hexdigest()[:8]
+                    if identifier in seen_ids:
+                        continue
+
+                    seen_ids.add(identifier)
+                    id_to_translate[identifier] = string
+                    total_lines += 1
+
+            lines_to_write = []
+            strings_to_write = []
+            outdated = 0
+            stats = {lang: [[], 0] for lang in languages}  # errors, written
+            for id, lines in langs_lines.items():
+                if id not in id_to_translate:
+                    outdated += 1
+                    continue
+
+                node = id_to_translate[id]
+                if id.startswith("string_"):
+                    filename = node.filename
+                    linenumber = node.line
+                    source = node.text
+                else:
+                    filename = node.filename
+                    linenumber = node.linenumber
+                    source = node.get_code()
+
+                for language, line in lines.items():
+                    if language in ("english", "russian"):
+                        continue
+
+                    error, result = validate_line(source, line, id)
+                    if error:
+                        stats[language][0].append(result)
+
+                    elif id.startswith("string_"):
+                        strings_to_write.append((language, filename, linenumber, source, result))
+                        stats[language][1] += 1
+                    else:
+                        old_what = node.what
+                        node.what = result
+                        result = node.get_code()
+                        node.what = old_what
+                        lines_to_write.append((language, filename, id, linenumber, source, result))
+                        stats[language][1] += 1
+
+            tl_directory = Path(renpy.config.gamedir) / renpy.config.tl_directory
+            for lang in languages:
+                l_tl = tl_directory / lang
+                if l_tl.exists():
+                    shutil.rmtree(l_tl)
+
+            for language, filename, id, linenumber, source, target in lines_to_write:
+
+                # TODO: Добавить все остальные флаги
+                if not (community_tl / "flags" / f"{language}.png").exists():
+                    continue
+
+                if not (launcher or filename.endswith("m")):
+                    filename += "m"
+
+                with get_translate_file(language, filename, lazy=not launcher) as f:
+                    f.write_translation_block(filename, linenumber, id, source, target)
+
+            for language, filename, linenumber, source, target in strings_to_write:
+
+                # TODO: Добавить все остальные флаги
+                if not (community_tl / "flags" / f"{language}.png").exists():
+                    continue
+
+                if not (launcher or filename.endswith("m")):
+                    filename += "m"
+
+                with get_translate_file(language, filename, lazy=not launcher) as f:
+                    f.write_translation_string(filename, linenumber, source, target)
+
+            with (community_tl / "ARCHIVE_HOLDER_TEMPLATE.rpy").open("r", encoding="utf-8") as f:
+                template = f.read()
+
+            for language in languages:
+                flag_fn = community_tl / "flags" / f"{language}.png"
+
+                # TODO: Добавить все остальные флаги
+                if not flag_fn.exists():
+                    continue
+
+                if not flag_fn.exists():
+                    raise Exception(f"Flag for {language} does not exists.")
+
+                l_tl = tl_directory / language
+
+                # In case no lines for launcher translated
+                l_tl.mkdir(parents=True, exist_ok=True)
+
+                shutil.copy(flag_fn, l_tl / "flag.png")
+
+                # Copy community_tl.rpy and extra.rpy from the game
+                # WARNING: it assumes import_community_tl for the game was
+                # launched prior to that
+                if launcher:
+                    game_tl = Path(renpy.config.gamedir, "../../game")
+                    game_tl = game_tl / renpy.config.tl_directory
+                    game_tl = game_tl / language
+
+                    community_tl_rpy = game_tl / "community_tl.rpy"
+                    shutil.copy(community_tl_rpy, l_tl / "community_tl.rpy")
+
+                    extra_code = game_tl / "extra.rpy"
+                    if extra_code.exists():
+                        shutil.copy(extra_code, l_tl / "extra.rpy")
+
+                    continue
+
+                md5 = hashlib.md5()
+                for fn in l_tl.rglob("*.rpym"):
+                    md5.update(open(fn, "r", encoding="utf-8").read().encode("utf-8"))
+                lang_hash = md5.hexdigest()[:8]
+
+                with (l_tl / "community_tl.rpy").open("w", encoding="utf-8") as f:
+                    f.write(template.format(
+                        archive_language=language,
+                        archive_hash=lang_hash,
+                        complete=stats[language][1] / total_lines * 100,
+                        language_name=language_names[language],
+                        language_alphabet=None,
+                    ))
+
+                extra_code = community_tl / "extra_code" / f"{language}.rpy"
+                if extra_code.exists():
+                    shutil.copy(extra_code, l_tl / "extra.rpy")
+
+            log(f"{outdated} lines outdated.")
+            for lang, (errors, written) in stats.items():
+                log("")
+                log(f"{lang}: {written} lines written, {len(errors)} errors.")
+                for error in errors:
+                    log(error)
+        return False
+    renpy.arguments.register_command("import_community_tl", import_community_tl)
+
+
+    def copyright_update():
+
+        renpy.arguments.takes_no_arguments("Checks and adds or updates the copyright in each script file.")
+
+        message = COPYRIGHT_MESSAGE
+        message_lines = [l + "\n" for l in message.split("\n")]
+
+        ok_files = 0
+        for i in renpy.list_files(common=False):
+            if i.endswith(".rpy") or i.endswith(".rpym"):
+                fn = os.path.join(renpy.config.gamedir, i)
+                fn = os.path.normpath(fn)
+                with io.open(fn, "r", encoding="utf-8") as f:
+                    data = f.read(len(message))
+
+                if data == message:
+                    ok_files += 1
+                    continue
+
+                with io.open(fn, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+
+                if lines:
+                    line = lines[0]
+
+                    # Skip BOM
+                    if line.startswith("\ufeff"):
+                        line = lines[0] = line[1:]
+
+                    if line.startswith("# Copyright"):
+                        lines[0] = "# Copyright © 2017-2023 All rights reserved.\n"
+
+                        if len(lines) < 3 or (
+                            lines[1] != "# Sad Crab Company. Contacts: mailto:sadcrabcom@yandex.ru\n" or
+                            lines[2] != "# License: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode\n"
+                        ):
+                            print(i + " has a corrupted license message")
+                            continue
+
+                        if len(lines) < 4 or lines[3] != "\n":
+                            lines.insert(3, "\n")
+
+                        print(i + " has been updated")
+
+                    else:
+                        lines = message_lines + lines
+                        print("In " + i + " a message has been added")
+
+                    with io.open(fn, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+
+        print()
+        print(str(ok_files) + " files are up to date")
+        return False
+    renpy.arguments.register_command("copyright_update", copyright_update)

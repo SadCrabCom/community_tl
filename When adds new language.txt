@@ -1,0 +1,6 @@
+1. Run 1_update_repos.bat to download all the changed lines on site.
+2. Run 2_update_import.bat to update lines.json.
+3. Add that language and its langauge code to the EXISTING_LANGUAGES.json.
+4. Add that language and its name to the LANGUAGE_NAMES.json.
+5. Run 3_export_csv.bat to create csv files of added language.
+6. Run 4_update_weblate.bat to upload new csv files.
